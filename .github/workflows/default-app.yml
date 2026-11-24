@@ -17,8 +17,8 @@ permissions:
 jobs:
   test:
     runs-on: macos-latest
-    # `set` waits when macOS asks the user to confirm a change. Nobody answers on a runner.
-    timeout-minutes: 15
+    # `set` does not return while macOS waits for an answer to its confirmation dialog.
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: default-app
@@ -26,17 +26,27 @@ jobs:
       - uses: actions/checkout@v7
       - run: swift build -c release
       - run: swift test
-      - name: Change default apps on the runner and check the result
+      - name: Check the commands on the runner
         run: |
           bin=.build/release/default-app
           "$bin" probe md ./Makefile ./Dockerfile
 
-          "$bin" set com.apple.TextEdit < code-files.txt
-          "$bin" probe md | grep -q '/TextEdit.app$'
+          # `set` must accept every name in the list.
+          "$bin" probe < code-files.txt > "$RUNNER_TEMP/list.tsv"
+          if cut -f 2 "$RUNNER_TEMP/list.tsv" | grep -x -e - -e public.data; then
+            echo "the list has a name that set refuses"
+            exit 1
+          fi
 
+          # A name that macOS does not know is refused, and nothing changes.
           before=$("$bin" probe ./Dockerfile)
           if "$bin" set com.apple.Safari ./Dockerfile; then
-            echo "set must refuse a name that macOS does not recognize"
+            echo "set must refuse a name that macOS does not know"
             exit 1
           fi
           test "$("$bin" probe ./Dockerfile)" = "$before"
+
+          # macOS asks a person to confirm a real change. Only a change to the app that
+          # is already the default returns on a runner.
+          current=$("$bin" probe md | cut -f 3)
+          "$bin" set "$current" md
