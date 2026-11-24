@@ -212,6 +212,12 @@ struct Main {
             do {
                 let (sample, type) = try setTarget(for: argument, in: samples)
                 let before = workspace.urlForApplication(toOpen: sample)
+                // macOS can ask the user to confirm the change, and answers only after that.
+                let notice = Task {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    report("\(argument): waiting for macOS. It can show a dialog that asks you to confirm this change.")
+                }
+                defer { notice.cancel() }
                 try await workspace.setDefaultApplication(at: app, toOpen: type)
                 let after = workspace.urlForApplication(toOpen: sample)
                 print("\(argument)\t\(type.identifier)\t\(before?.path ?? "-") -> \(after?.path ?? "-")")
