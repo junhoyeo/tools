@@ -1,0 +1,42 @@
+name: default-app
+
+on:
+  pull_request:
+    paths:
+      - "default-app/**"
+      - ".github/workflows/default-app.yml"
+  push:
+    branches: [main]
+    paths:
+      - "default-app/**"
+      - ".github/workflows/default-app.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    # `set` waits when macOS asks the user to confirm a change. Nobody answers on a runner.
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: default-app
+    steps:
+      - uses: actions/checkout@v7
+      - run: swift build -c release
+      - run: swift test
+      - name: Change default apps on the runner and check the result
+        run: |
+          bin=.build/release/default-app
+          "$bin" probe md ./Makefile ./Dockerfile
+
+          "$bin" set com.apple.TextEdit < code-files.txt
+          "$bin" probe md | grep -q '/TextEdit.app$'
+
+          before=$("$bin" probe ./Dockerfile)
+          if "$bin" set com.apple.Safari ./Dockerfile; then
+            echo "set must refuse a name that macOS does not recognize"
+            exit 1
+          fi
+          test "$("$bin" probe ./Dockerfile)" = "$before"
