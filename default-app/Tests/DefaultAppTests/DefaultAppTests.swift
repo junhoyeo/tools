@@ -53,8 +53,29 @@ final class DefaultAppTests: XCTestCase {
         XCTAssertEqual(contentType(of: sample), .rtfd)
     }
 
-    func testUnrecognizedNameHasTheTypeThatSetRefuses() throws {
-        let sample = try XCTUnwrap(makeSample(for: "./default-app-unrecognized-name", in: directory))
-        XCTAssertEqual(contentType(of: sample), .data)
+    func testSetRefusesANameThatMacOSDoesNotRecognize() {
+        // The last argument is a path to a folder that exists. `set` must use its name only:
+        // if it followed the path, the content type would be public.folder and not refused.
+        for argument in ["./Dockerfile", "./.env", directory.path] {
+            XCTAssertThrowsError(try setTarget(for: argument, in: directory), argument) { error in
+                XCTAssertEqual(error as? SetRefusal, .unrecognizedName)
+            }
+        }
+    }
+
+    func testSetTargetsTheContentTypeOfTheName() throws {
+        XCTAssertEqual(try setTarget(for: "json", in: directory).type, .json)
+        XCTAssertEqual(try setTarget(for: "notes/data.json", in: directory).type, .json)
+    }
+
+    func testProbeChecksAnExistingPathItself() throws {
+        let item = try XCTUnwrap(probeItem(for: directory.path, in: directory))
+        XCTAssertEqual(contentType(of: item), .folder)
+    }
+
+    func testApplicationIsAPathOrABundleIdentifier() {
+        XCTAssertEqual(application("/System/Applications/TextEdit.app")?.lastPathComponent, "TextEdit.app")
+        XCTAssertEqual(application("com.apple.TextEdit")?.lastPathComponent, "TextEdit.app")
+        XCTAssertNil(application("com.example.no-such-application.app"))
     }
 }

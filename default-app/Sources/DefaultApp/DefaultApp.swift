@@ -10,7 +10,7 @@ let usage = """
             or a bundle identifier (com.microsoft.VSCode)
     name    an extension (md, .md), or a file name or path (README.md, ./Makefile)
 
-    Without names, they are read from standard input, one per line.
+    Without names, they are read from a pipe or a file on standard input, one per line.
     Blank lines and lines that start with # are skipped.
     """
 
@@ -23,8 +23,8 @@ func isExtension(_ argument: String) -> Bool {
 /// The name of the sample file that stands for `argument`: `sample.md` for the extension
 /// `md`, and the last path component for a file name or path.
 /// A path is read as text and never resolved. `URL(fileURLWithPath: "..").lastPathComponent`
-/// is the name of the parent directory, and a file with that name has the content type of
-/// every unrecognized file.
+/// is the name of the parent directory, and a file with that name has the content type
+/// public.data, which `set` must not change.
 func sampleName(for argument: String) -> String? {
     guard isExtension(argument) else {
         return (argument as NSString).lastPathComponent
@@ -46,9 +46,9 @@ func isDeclared(_ ext: String, conformingTo supertype: UTType) -> Bool {
 }
 
 /// Creates an empty item that stands for `argument`, directly inside `directory`.
-/// macOS types an item by its name, so an empty item answers for every file with that name.
-/// An extension that is declared only for package types (.xcodeproj, .rtfd) gets a directory,
-/// because macOS only gives a directory that type.
+/// macOS takes the content type of a file from its name, so an empty file answers for the
+/// files with that name. An extension that is declared only for package types
+/// (.xcodeproj, .rtfd) gets a directory, because macOS only gives a directory that type.
 func makeSample(for argument: String, in directory: URL) -> URL? {
     guard let name = sampleName(for: argument) else {
         return nil
@@ -77,13 +77,58 @@ func contentType(of url: URL) -> UTType? {
     try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
 }
 
-/// The application for the `<app>` argument: a path, or a bundle identifier.
-func application(_ argument: String) -> URL? {
-    guard argument.contains("/") || argument.hasSuffix(".app") else {
-        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: argument)
+/// The item that `probe` checks for `argument`: the path itself when it exists, otherwise
+/// its sample. An existing item can differ from its sample: an executable file with no
+/// extension is public.unix-executable, and a file can have an app chosen for it alone.
+func probeItem(for argument: String, in samples: URL) -> URL? {
+    if !isExtension(argument) && FileManager.default.fileExists(atPath: argument) {
+        return URL(fileURLWithPath: argument)
     }
+    return makeSample(for: argument, in: samples)
+}
+
+enum SetRefusal: Error, CustomStringConvertible {
+    case unusableName
+    case noContentType
+    case unrecognizedName
+
+    var description: String {
+        switch self {
+        case .unusableName:
+            return "not a usable file name"
+        case .noContentType:
+            return "no content type"
+        case .unrecognizedName:
+            return "macOS has no content type for this name. It gets public.data, as every unrecognized name without an extension does, so `set` does not change it."
+        }
+    }
+}
+
+/// The sample and the content type that `set` changes for `argument`.
+/// `set` uses the name only, also when the argument is a path that exists: a path to a
+/// folder must not make `set` change the app for folders.
+/// public.data is refused, because one name such as `Dockerfile` would change the app for
+/// every unrecognized name without an extension.
+func setTarget(for argument: String, in samples: URL) throws -> (sample: URL, type: UTType) {
+    guard let sample = makeSample(for: argument, in: samples) else {
+        throw SetRefusal.unusableName
+    }
+    guard let type = contentType(of: sample) else {
+        throw SetRefusal.noContentType
+    }
+    guard type != .data else {
+        throw SetRefusal.unrecognizedName
+    }
+    return (sample, type)
+}
+
+/// The application for the `<app>` argument: the path of an application, or a bundle identifier.
+func application(_ argument: String) -> URL? {
     let url = URL(fileURLWithPath: argument)
-    return Bundle(url: url)?.bundleIdentifier == nil ? nil : url
+    if Bundle(url: url)?.bundleIdentifier != nil {
+        return url
+    }
+    return NSWorkspace.shared.urlForApplication(withBundleIdentifier: argument)
 }
 
 func sameApplication(_ a: URL?, _ b: URL) -> Bool {
@@ -99,6 +144,10 @@ func report(_ message: String) {
 @MainActor
 struct Main {
     static func main() async {
+        // Each result is written when it is known, also to a pipe, so that the output shows
+        // how far `set` came when macOS waits for the user to confirm a change.
+        setlinebuf(stdout)
+
         var arguments = Array(CommandLine.arguments.dropFirst())
         guard let command = arguments.first, command == "probe" || command == "set" else {
             report(usage)
@@ -124,9 +173,13 @@ struct Main {
             report(usage)
             exit(2)
         }
-        let inputs = arguments.isEmpty
-            ? names(in: String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self))
-            : arguments
+        if arguments.isEmpty {
+            guard let list = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) else {
+                report("error: standard input is not UTF-8 text")
+                exit(2)
+            }
+            arguments = names(in: list)
+        }
 
         let workspace = NSWorkspace.shared
         let fileManager = FileManager.default
@@ -139,47 +192,38 @@ struct Main {
         }
 
         var failed = false
-        for argument in inputs {
-            // `probe` checks an existing path itself, so that a choice made for that one file shows.
-            let item: URL
-            if app == nil && !isExtension(argument) && fileManager.fileExists(atPath: argument) {
-                item = URL(fileURLWithPath: argument)
-            } else if let sample = makeSample(for: argument, in: samples) {
-                item = sample
-            } else {
-                report("error: \(argument): not a usable file name")
-                failed = true
-                continue
+        for argument in arguments {
+            if isExtension(argument) && fileManager.fileExists(atPath: argument) {
+                report("note: \(argument): read as an extension. For the item with that name, write ./\(argument)")
             }
 
-            let type = contentType(of: item)
-            let before = workspace.urlForApplication(toOpen: item)
             guard let app else {
-                print([argument, type?.identifier ?? "-", before?.path ?? "-"].joined(separator: "\t"))
+                guard let item = probeItem(for: argument, in: samples) else {
+                    report("error: \(argument): \(SetRefusal.unusableName)")
+                    failed = true
+                    continue
+                }
+                let type = contentType(of: item)?.identifier ?? "-"
+                let opener = workspace.urlForApplication(toOpen: item)?.path ?? "-"
+                print("\(argument)\t\(type)\t\(opener)")
                 continue
             }
 
-            guard let type else {
-                report("error: \(argument): no content type")
-                failed = true
-                continue
-            }
-            if type == .data {
-                report("error: \(argument): macOS does not recognize this name. Its content type, public.data, belongs to every unrecognized file, so `set` does not change it.")
-                failed = true
-                continue
-            }
             do {
+                let (sample, type) = try setTarget(for: argument, in: samples)
+                let before = workspace.urlForApplication(toOpen: sample)
                 try await workspace.setDefaultApplication(at: app, toOpen: type)
+                let after = workspace.urlForApplication(toOpen: sample)
+                print("\(argument)\t\(type.identifier)\t\(before?.path ?? "-") -> \(after?.path ?? "-")")
+                if !sameApplication(after, app) {
+                    report("error: \(argument): macOS did not make \(app.path) the default app")
+                    failed = true
+                }
+            } catch let refusal as SetRefusal {
+                report("error: \(argument): \(refusal)")
+                failed = true
             } catch {
                 report("error: \(argument): \(error.localizedDescription)")
-                failed = true
-                continue
-            }
-            let after = workspace.urlForApplication(toOpen: item)
-            print("\(argument)\t\(type.identifier)\t\(before?.path ?? "-") -> \(after?.path ?? "-")")
-            if !sameApplication(after, app) {
-                report("error: \(argument): macOS did not make \(app.path) the default app")
                 failed = true
             }
         }
