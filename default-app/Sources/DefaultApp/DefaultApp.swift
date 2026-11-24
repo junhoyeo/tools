@@ -122,18 +122,48 @@ func setTarget(for argument: String, in samples: URL) throws -> (sample: URL, ty
     return (sample, type)
 }
 
-/// The application for the `<app>` argument: the path of an application, or a bundle identifier.
-func application(_ argument: String) -> URL? {
-    let url = URL(fileURLWithPath: argument)
-    if Bundle(url: url)?.bundleIdentifier != nil {
-        return url
-    }
-    return NSWorkspace.shared.urlForApplication(withBundleIdentifier: argument)
+/// The application that the `<app>` argument names.
+struct RequestedApp {
+    let url: URL
+    /// The argument was the path of one copy of the app, not a bundle identifier.
+    let isPath: Bool
 }
 
-func sameApplication(_ a: URL?, _ b: URL) -> Bool {
-    guard let a, let identifier = Bundle(url: a)?.bundleIdentifier else { return false }
-    return identifier.caseInsensitiveCompare(Bundle(url: b)?.bundleIdentifier ?? "") == .orderedSame
+/// The application for the `<app>` argument: the path of an application, or a bundle identifier.
+func application(_ argument: String) -> RequestedApp? {
+    let url = URL(fileURLWithPath: argument)
+    if Bundle(url: url)?.bundleIdentifier != nil {
+        return RequestedApp(url: url, isPath: true)
+    }
+    return NSWorkspace.shared.urlForApplication(withBundleIdentifier: argument).map {
+        RequestedApp(url: $0, isPath: false)
+    }
+}
+
+func isSameFile(_ a: URL, _ b: URL) -> Bool {
+    func identity(_ url: URL) -> NSObjectProtocol? {
+        try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+    }
+    guard let a = identity(a), let b = identity(b) else { return false }
+    return a.isEqual(b)
+}
+
+func hasSameBundleIdentifier(_ a: URL, _ b: URL) -> Bool {
+    guard let a = Bundle(url: a)?.bundleIdentifier, let b = Bundle(url: b)?.bundleIdentifier else { return false }
+    return a.caseInsensitiveCompare(b) == .orderedSame
+}
+
+/// Why `opener`, the app that macOS now uses, is not the requested app, or nil when it is.
+/// macOS stores the bundle identifier of the default app. When the user named one copy by
+/// its path, macOS can still open the file with another copy of the same app.
+func mismatch(of opener: URL?, with app: RequestedApp) -> String? {
+    guard let opener, hasSameBundleIdentifier(opener, app.url) else {
+        return "macOS did not make \(app.url.path) the default app"
+    }
+    if app.isPath && !isSameFile(opener, app.url) {
+        return "macOS opens another copy of this app, \(opener.path). It stores the bundle identifier, not the path."
+    }
+    return nil
 }
 
 func report(_ message: String) {
@@ -155,17 +185,17 @@ struct Main {
         }
         arguments.removeFirst()
 
-        var app: URL?
+        var app: RequestedApp?
         if command == "set" {
             guard let argument = arguments.first else {
                 report(usage)
                 exit(2)
             }
-            guard let url = application(argument) else {
+            guard let requested = application(argument) else {
                 report("error: no application found for \(argument)")
                 exit(2)
             }
-            app = url
+            app = requested
             arguments.removeFirst()
         }
 
@@ -218,11 +248,11 @@ struct Main {
                     report("\(argument): waiting for macOS. It can show a dialog that asks you to confirm this change.")
                 }
                 defer { notice.cancel() }
-                try await workspace.setDefaultApplication(at: app, toOpen: type)
+                try await workspace.setDefaultApplication(at: app.url, toOpen: type)
                 let after = workspace.urlForApplication(toOpen: sample)
                 print("\(argument)\t\(type.identifier)\t\(before?.path ?? "-") -> \(after?.path ?? "-")")
-                if !sameApplication(after, app) {
-                    report("error: \(argument): macOS did not make \(app.path) the default app")
+                if let mismatch = mismatch(of: after, with: app) {
+                    report("error: \(argument): \(mismatch)")
                     failed = true
                 }
             } catch let refusal as SetRefusal {

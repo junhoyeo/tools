@@ -73,9 +73,39 @@ final class DefaultAppTests: XCTestCase {
         XCTAssertEqual(contentType(of: item), .folder)
     }
 
-    func testApplicationIsAPathOrABundleIdentifier() {
-        XCTAssertEqual(application("/System/Applications/TextEdit.app")?.lastPathComponent, "TextEdit.app")
-        XCTAssertEqual(application("com.apple.TextEdit")?.lastPathComponent, "TextEdit.app")
+    func testApplicationIsAPathOrABundleIdentifier() throws {
+        let byPath = try XCTUnwrap(application("/System/Applications/TextEdit.app"))
+        XCTAssertEqual(byPath.url.lastPathComponent, "TextEdit.app")
+        XCTAssertTrue(byPath.isPath)
+
+        let byIdentifier = try XCTUnwrap(application("com.apple.TextEdit"))
+        XCTAssertEqual(byIdentifier.url.lastPathComponent, "TextEdit.app")
+        XCTAssertFalse(byIdentifier.isPath)
+
         XCTAssertNil(application("com.example.no-such-application.app"))
+    }
+
+    func testAnotherCopyIsNotTheAppThatWasNamedByItsPath() throws {
+        let first = try makeBundle(named: "First.app")
+        let second = try makeBundle(named: "Second.app")
+        let link = directory.appendingPathComponent("Link.app")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+
+        XCTAssertNil(mismatch(of: first, with: RequestedApp(url: first, isPath: true)))
+        XCTAssertNil(mismatch(of: first, with: RequestedApp(url: link, isPath: true)))
+        XCTAssertNotNil(mismatch(of: second, with: RequestedApp(url: first, isPath: true)))
+        XCTAssertNil(mismatch(of: second, with: RequestedApp(url: first, isPath: false)))
+        XCTAssertNotNil(mismatch(of: nil, with: RequestedApp(url: first, isPath: false)))
+    }
+
+    /// A bundle that only this test knows. Both copies have the same bundle identifier.
+    private func makeBundle(named name: String) throws -> URL {
+        let url = directory.appendingPathComponent(name)
+        let contents = url.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info = ["CFBundleIdentifier": "test.default-app.copy"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: contents.appendingPathComponent("Info.plist"))
+        return url
     }
 }
