@@ -9,6 +9,10 @@
 #   plist xcodeproj xcworkspace    Apple and Xcode formats
 #   dot                            macOS reads .dot as a Microsoft Word template
 #
+# Every line except the last is an extension. `gitignore`, `bashrc`, `dockerfile` and `env`
+# mean files such as `node.gitignore` and `api.dockerfile`. Files named `.gitignore`,
+# `.bashrc`, `Dockerfile` and `.env` have no extension, and this list does not change them.
+#
 # Two extensions share their content type with video files.
 # Those video files get the same default app:
 #   ts     MPEG-2 transport stream
